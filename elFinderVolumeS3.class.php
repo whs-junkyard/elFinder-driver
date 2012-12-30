@@ -1,9 +1,8 @@
 <?php
-
 /**
- * MongoDB GridFS driver for elFinder
+ * Amazon S3 driver for elFinder
  *
- * Supply your own MongoGridFS instance to 'db' option
+ * Use your own aws.phar or use the one supplied
  *
  * @author Manatsawin Hanmongkolchai
  * @license Apache license 2.0
@@ -11,100 +10,104 @@
  * Kyou project's development is sponsored by NECTEC under NSC2013 program.
  * NECTEC does not provides support for this driver
  */
-class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
+
+/*
+make
+_fopen
+_fclose
+_copy
+_move
+_unlink
+_save
+_getContents
+_filePutContents
+*/
+
+require_once "aws.phar";
+
+class elFinderVolumeS3 extends elFinderVolumeDriver {
 	/**
 	 * @var string
 	 */
-	protected $driverId = 'm';
-	/**
-	* @var MongoGridFS
-	*/
-	protected $db;
-
-	/**
-	 * File used to hold a directory metadata
-	 * Should not be changed
-	 */
-	const PLACEHOLDER = "__placeholder";
+	protected $driverId = 's';
+	protected $s3;
 
 	public function __construct(){
-		// Actually MongoClient only exists in v1.3.0 so you will get class not found anyway
-		// \m/
-		if(version_compare(MongoClient::VERSION, '1.3.0', '<')){
-			throw new RuntimeException("elFinderVolumeMongoGridFS only supports MongoClient version 1.3.0 and above");
-		}
 		$this->options['mimeDetect'] = 'internal';
+		if(!isset($this->options['s3'])){
+			$this->options['s3'] = array();
+		}
+		if(!isset($this->options['acl'])){
+			$this->options['acl'] = 'private';
+		}
 	}
 
 	/**
-	 * Check for connection
+	 * Create S3Client
+	 * All options to S3Client is supplied in the s3 option
+	 * See http://docs.amazonwebservices.com/aws-sdk-php-2/latest/class-Aws.S3.S3Client.html for list of S3Client options
+	 * See http://docs.amazonwebservices.com/general/latest/gr/rande.html#s3_region for list of region names
 	 * @return bool
 	 */
 	protected function init(){
-		if($this->options['db'] instanceof MongoDB){
-			$this->options['db'] = $this->options['db']->getGridFS();
-		}else if(!$this->options['db'] instanceof MongoGridFS){
-			throw new InvalidArgumentException("db option is not instance of MongoDB or MongoGridFS");
-		}
-		$this->db = $this->options['db'];
+		$this->s3 = Aws\S3\S3Client::factory($this->options['s3']);
+		$this->bucket = $this->options['bucket'];
 		return true;
 	}
 
-	protected function format_stat(MongoGridFSFile $file){
+	protected function format_stat($file){
+		$dt = DateTime::createFromFormat(Aws\Common\Enum\DateFormat::RFC1123, $file['LastModified']);
+		$meta = $file['Metadata'];
 		return array(
-			"name" => $file->getFilename(),
-			"size" => $file->getSize(),
-			"ts" => $file->file['uploadDate']->sec,
-			"mime" => $file->file['metadata']['mime'],
+			"name" => $file['filename'],
+			"size" => $file['ContentLength'],
+			"ts" => $dt->getTimestamp(),
+			"mime" => $file['ContentType'],
 			"read" => true,
 			"write" => true,
-			"width" => $file->file['metadata']['width'],
-			"height" => $file->file['metadata']['height'],
+			"width" => $meta['width'],
+			"height" => $meta['height'],
 		);
-	}
-
-	protected function subdirs($path){
-		$subdirs = $this->db->find(array(
-			"metadata.path" => new MongoRegex('/^'.preg_quote($path, '/').'\/[^\/]+$/')
-		), array("metadata.path" => true));
-		$subdirsName = array();
-		foreach($subdirs as $item){
-			$subdirsName[] = $item->file['metadata']['path'];
-		}
-		return array_unique($subdirsName);
 	}
 
 	/**
 	 * Scan directory
 	 */
 	protected function cacheDir($path) {
+		$rpath = preg_replace('~/$~', '', $path) . "/";
 		$this->dirsCache[$path] = array();
-		$path = preg_replace('~/$~', '', $path);
-		// subdirs in the directory
-		foreach($this->subdirs($path) as $subdir){
+		$scan = $this->s3->listObjects(array(
+			"Bucket" => $this->bucket,
+			"Prefix" => $rpath,
+			"Delimiter" => "/"
+		));
+		//print $path."===\n";
+		foreach($scan['CommonPrefixes'] as $prefix){
+			if($prefix['Prefix'] == $rpath){
+				continue;
+			}
+			preg_match('~/([^/]+)/$~', $prefix['Prefix'], $m);
 			$data = array(
-				//"id" => $subdir,
-				"name" => $subdir,
+				"name" => $m[1],
 				"size" => 0,
 				"mime" => "directory",
 				"read" => true,
 				"write" => true,
 				"parent_id" => $path,
 			);
-			if ($stat = $this->updateCache($this->_joinPath($path, $data['name']), $data)) {
-				$this->dirsCache[$path][] = $data['name'];
+			$fullpath = $this->_joinPath($path, $data['name']);
+			//print $fullpath."\n";
+			if ($stat = $this->updateCache($fullpath, $data)) {
+				$this->dirsCache[$path][] = $fullpath;
 			}
 		}
+		//print "\n";
 
-		// files in the directory
-		$files = $this->db->find(array(
-			"metadata.path" => $path
-		));
-		foreach($files as $file){
-			if($file->getFilename() == $this::PLACEHOLDER){ // for mkdir()
+		foreach($scan['Contents'] as $file){
+			if(preg_match('~/$~', $file['Key'])){
 				continue;
 			}
-			$data = $this->format_stat($file);
+			$data = $this->format_stat($this->getFile($file['Key']));
 			$fullpath = $this->_joinPath($path, $data['name']);
 			if ($stat = $this->updateCache($fullpath, $data)) {
 				$this->dirsCache[$path][] = $fullpath;
@@ -116,24 +119,29 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 
 	protected function make($path, $name, $mime){
 		if($mime == "directory"){
-			$path = $this->_joinPath($path, $name);
-			$name = $this::PLACEHOLDER;
+			$name .= "/";
 		}
-		return $this->db->storeBytes("", array(
-			"filename" => $name,
-			"metadata" => array(
-				"path" => $path,
-				"mime" => $mime,
-			)
+		$path = $this->_joinPath($path, $name);
+		return $this->s3->putObject(array(
+			"Bucket" => $this->bucket,
+			"Key" => $path,
+			"ContentType" => $mime,
+			"ACL" => $this->options['acl']
 		));
 	}
 
-	protected function getFile($path){
-		$file = $this->db->findOne(array(
-			"filename" => $this->_basename($path),
-			"metadata.path" => $this->_dirname($path)
-		));
-		return $file;
+	protected function getFile($path, $method="headObject"){
+		try{
+			$fileData = $this->s3->$method(array(
+				"Bucket" => $this->bucket,
+				"Key" => $path
+			));
+		}catch(Aws\S3\Exception\NoSuchKeyException $e){
+			return false;
+		}
+		$fileData['filename'] = $this->_basename($path);
+		$fileData['path'] = $path;
+		return $fileData;
 	}
 
 	/**
@@ -166,34 +174,39 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 	protected function _stat($path) {
 		$file = $this->getFile($path);
 		if(!$file){
-			// It could be a directory...
-			$path = preg_replace('~/$~', '', $path);
-			$file = $this->db->find(array(
-				"metadata.path" => $path
-			));
-			$file->sort(array(
-				"uploadDate" => -1
-			));
-			if($file->count() == 0 && $path != $this->root){
+			$qpath = $path;
+			if(!preg_match('~/$~', $path)){
+				$qpath .= '/';
+			}else{
 				return false;
 			}
-			$parent_dir = preg_replace('~[/]{0,1}[^\/]+$~', '', $path);
-			$subdir = count($this->subdirs($path));
-			$out = array(
-				//"id" => $this->_basename($path),
-				"name" => $this->_basename($path),
+			// _subdirs need to know is there any subdir
+			$dirList = $this->getScandir($qpath);
+			$dirs = 0;
+			if(count($dirList) > 0){
+				foreach($dirList as $dir){
+					if($dir['mime'] == "directory"){
+						$dirs++;
+					}
+				}
+			}else if($path != $this->root){
+				// sometimes this is an empty directory
+				// but we need special case for root, root always exists
+				if(!$this->getFile($qpath)){
+					return false;
+				}
+			}
+			$parent_dir = preg_replace('~/(.*?)[/]{0,1}$~', '', $path);
+			$data = array(
+				"name" => $path,
 				"size" => 0,
-				"ts" => $file->current()->file['uploadDate']->sec,
 				"mime" => "directory",
-				"dirs" => $subdir,
 				"read" => true,
 				"write" => true,
+				"dirs" => $dirs,
 				"parent_id" => $parent_dir,
 			);
-			if($path == $this->root){
-				unset($out['parent_id']);
-			}
-			return $out;
+			return $data;
 		}
 		return $this->format_stat($file);
 	}
@@ -206,11 +219,11 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 	 * @return resource|false
 	 **/
 	protected function _fopen($path, $mode='rb'){
-		$file = $this->getFile($path);
+		$file = $this->getFile($path, 'getObject');
 		if(!$file){
 			return false;
 		}
-		return $file->getResource();
+		return $file['Body']->getStream();
 	}
 
 	/**
@@ -222,23 +235,21 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 
 	/**
 	 * Copy file into another file
-	 * WARNING: This function loads the entire file into memory
+	 * S3 does not preserve ACL for a file
+	 * also can be used only for file smaller than 5GB
 	 *
 	 * @param  string  $source     source file path
 	 * @param  string  $targetDir  target directory path
 	 * @param  string  $name       new file name
-	 * @return string
+	 * @return Guzzle\Service\Resource\Model
 	 **/
 	protected function _copy($source, $targetDir, $name) {
 		$this->clearcache();
-		$src = $this->getFile($source);
-		$targetDir = preg_replace('~/$~', '', $targetDir);
-		return $this->db->storeBytes($src->getBytes(), array(
-			"filename" => $name,
-			"metadata" => array(
-				"path" => $targetDir,
-				"mime" => $src->file['metadata']['mime'],
-			)
+		return $this->s3->copyObject(array(
+			"Bucket" => $this->bucket,
+			"Key" => $this->_joinPath($targetDir, $name),
+			"CopySource" => $this->bucket . "/" . $source,
+			"ACL" => $this->options['acl']
 		));
 	}
 
@@ -252,16 +263,8 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 	 * @return string
 	 **/
 	protected function _move($source, $targetDir, $name) {
-		$targetDir = preg_replace('~/$~', '', $targetDir);
-		$this->db->update(array(
-			'filename' => $this->_basename($source),
-			'metadata.path' => $this->_dirname($source),
-		), array(
-			'$set' => array(
-				'filename' => (string) $name,
-				'metadata.path' => $targetDir
-			)
-		));
+		$this->_copy($source, $targetDir, $name);
+		$this->_unlink($this->_joinPath($targetDir, $name));
 		return $targetDir;
 	}
 
@@ -269,14 +272,13 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 	 * Remove file
 	 *
 	 * @param  string  $path  file path
-	 * @return bool
+	 * @return Guzzle\Service\Resource\Model
 	 **/
 	protected function _unlink($path) {
-		$file = $this->getFile($path);
-		if(!$file){
-			return false;
-		}
-		return $this->db->delete($file->file['_id']);
+		return $this->s3->deleteObject(array(
+			"Bucket" => $this->bucket,
+			"Key" => $path
+		));
 	}
 
 	/**
@@ -286,10 +288,13 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 	 * @return bool
 	 **/
 	protected function _rmdir($path) {
+		if(!preg_match('~/$~', $path)){
+			$path .= '/';
+		}
 		if(count($this->_scandir($path)) > 0){
 			return false;
 		}
-		return $this->_unlink($this->_joinPath($path, $this::PLACEHOLDER));
+		return $this->_unlink($path);
 	}
 
 	/**
@@ -302,19 +307,17 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 	 * @return bool|string
 	 **/
 	protected function _save($fp, $dir, $name, $mime, $w, $h) {
-		$dir = preg_replace('~/$~', '', $dir);
-		$content = '';
-		while (!feof($fp)) {
-			$content .= fread($fp, 8192);
-		}
-		$this->db->storeBytes($content, array(
-			"filename" => $name,
-			"metadata" => array(
-				"path" => $dir,
-				"mime" => $mime,
-				"width" => $w,
-				"height" => $h
-			)
+		$path = $this->_joinPath($dir, $name);
+		$this->s3->putObject(array(
+			"Bucket" => $this->bucket,
+			"Key" => $path,
+			"ContentType" => $mime,
+			"ACL" => $this->options['acl'],
+			"Metadata" => array(
+				'width' => $w,
+				'height' => $h
+			),
+			"Body" => $fp
 		));
 		return $this->_joinPath($dir, $name);
 	}
@@ -326,11 +329,11 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 	 * @return string|false
 	 **/
 	protected function _getContents($path) {
-		$file = $this->getFile($path);
+		$file = $this->getFile($path, 'getObject');
 		if(!$file){
 			return false;
 		}
-		return $file->getBytes();
+		return (string) $file['Body'];
 	}
 	
 	/**
@@ -341,14 +344,23 @@ class elFinderVolumeMongoGridFS extends elFinderVolumeDriver {
 	 * @return bool
 	 **/
 	protected function _filePutContents($path, $content) {
-		$oldFile = $this->getFile($path);
-		if(!$oldFile){
-			return false;
+		$oldSettings = $this->getFile($path);
+		$settings = array(
+			"Bucket" => $this->bucket,
+			"Key" => $path,
+			"ACL" => $this->options['acl'],
+			"Body" => $content
+		);
+		if($oldSettings){
+			$settings['Metadata'] = $oldSettings['Metadata'];
+			$settings['ContentType'] = $oldSettings['ContentType'];
+			$settings['ACP'] = Aws\S3\Model\Acp::fromArray($this->s3->getObjectAcl(array(
+				'Bucket' => $this->bucket,
+				'Key' => $path
+			))->toArray());
+			unset($settings['ACL']);
 		}
-		return $this->db->storeBytes($content, array(
-			"filename" => $oldFile->file['filename'],
-			"metadata" => $oldFile->file['metadata']
-		));
+		return $this->s3->putObject($settings);
 	}
 
 

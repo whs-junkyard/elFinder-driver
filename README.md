@@ -31,3 +31,42 @@ $elfinder = new elFinder(array(
 	)
 ));
 ~~~~~
+
+## elFinderVolumeS3
+
+Driver for Amazon S3. Requires aws.phar which is bundled.
+
+This driver does not support folder larger than 1,000 items, the maximum content length that could be returned from a single request to S3 API.
+
+### Usage
+
+For a list of region names, see http://docs.amazonwebservices.com/general/latest/gr/rande.html#s3_region
+
+For a list of canned ACL, see http://docs.amazonwebservices.com/AmazonS3/latest/dev/ACLOverview.html The default is `private`
+
+To get access key and secret, go to https://portal.aws.amazon.com/gp/aws/securityCredentials
+
+Bucket needs to be created beforehand.
+
+~~~~~php
+require_once 'elfinder/php/elFinder.class.php';
+require_once 'elfinder/php/elFinderVolumeDriver.class.php';
+require_once 'elfinder-driver/elFinderVolumeS3.class.php';
+$elfinder = new elFinder(array(
+	'roots' => array(
+		array(
+			'driver' => 'S3',
+			"s3" => array(
+				"key" => "ASDF",
+				"secret" => "asdf",
+				"region" => "ap-southeast-1"
+			),
+			"bucket" => "elfinder",
+			"acl" => "private"
+		)
+	)
+));
+~~~~~
+
+### Known Issue
+Moving file does not work
