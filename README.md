@@ -67,6 +67,3 @@ $elfinder = new elFinder(array(
 	)
 ));
 ~~~~~
-
-### Known Issue
-Moving file does not work

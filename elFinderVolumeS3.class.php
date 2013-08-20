@@ -81,36 +81,39 @@ class elFinderVolumeS3 extends elFinderVolumeDriver {
 			"Prefix" => $rpath,
 			"Delimiter" => "/"
 		));
-		//print $path."===\n";
-		foreach($scan['CommonPrefixes'] as $prefix){
-			if($prefix['Prefix'] == $rpath){
-				continue;
-			}
-			preg_match('~/([^/]+)/$~', $prefix['Prefix'], $m);
-			$data = array(
-				"name" => $m[1],
-				"size" => 0,
-				"mime" => "directory",
-				"read" => true,
-				"write" => true,
-				"parent_id" => $path,
-			);
-			$fullpath = $this->_joinPath($path, $data['name']);
-			//print $fullpath."\n";
-			if ($stat = $this->updateCache($fullpath, $data)) {
-				$this->dirsCache[$path][] = $fullpath;
+		
+		if(isset($scan['CommonPrefixes'])){
+			foreach($scan['CommonPrefixes'] as $prefix){
+				if($prefix['Prefix'] == $rpath){
+					continue;
+				}
+				preg_match('~/([^/]+)/$~', $prefix['Prefix'], $m);
+				$data = array(
+					"name" => $m[1],
+					"size" => 0,
+					"mime" => "directory",
+					"read" => true,
+					"write" => true,
+					"parent_id" => $path,
+				);
+				$fullpath = $this->_joinPath($path, $data['name']);
+				//print $fullpath."\n";
+				if ($stat = $this->updateCache($fullpath, $data)) {
+					$this->dirsCache[$path][] = $fullpath;
+				}
 			}
 		}
-		//print "\n";
 
-		foreach($scan['Contents'] as $file){
-			if(preg_match('~/$~', $file['Key'])){
-				continue;
-			}
-			$data = $this->format_stat($this->getFile($file['Key']));
-			$fullpath = $this->_joinPath($path, $data['name']);
-			if ($stat = $this->updateCache($fullpath, $data)) {
-				$this->dirsCache[$path][] = $fullpath;
+		if(isset($scan['Contents'])){
+			foreach($scan['Contents'] as $file){
+				if(preg_match('~/$~', $file['Key'])){
+					continue;
+				}
+				$data = $this->format_stat($this->getFile($file['Key']));
+				$fullpath = $this->_joinPath($path, $data['name']);
+				if ($stat = $this->updateCache($fullpath, $data)) {
+					$this->dirsCache[$path][] = $fullpath;
+				}
 			}
 		}
 		
@@ -264,7 +267,7 @@ class elFinderVolumeS3 extends elFinderVolumeDriver {
 	 **/
 	protected function _move($source, $targetDir, $name) {
 		$this->_copy($source, $targetDir, $name);
-		$this->_unlink($this->_joinPath($targetDir, $name));
+		$this->_unlink($source);
 		return $targetDir;
 	}
 
