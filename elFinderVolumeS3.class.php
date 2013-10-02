@@ -201,7 +201,7 @@ class elFinderVolumeS3 extends elFinderVolumeDriver {
 			}
 			$parent_dir = preg_replace('~/(.*?)[/]{0,1}$~', '', $path);
 			$data = array(
-				"name" => $path,
+				"name" => basename($path),
 				"size" => 0,
 				"mime" => "directory",
 				"read" => true,
