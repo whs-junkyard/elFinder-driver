@@ -309,8 +309,13 @@ class elFinderVolumeS3 extends elFinderVolumeDriver {
 	 * @param  string    $name file name
 	 * @return bool|string
 	 **/
-	protected function _save($fp, $dir, $name, $mime, $w, $h) {
+	protected function _save($fp, $dir, $name, $stat) {
 		$path = $this->_joinPath($dir, $name);
+		
+		$mime = $stat['mime'];
+		$w = !empty($stat['width'])  ? $stat['width']  : 0;
+		$h = !empty($stat['height']) ? $stat['height'] : 0;
+
 		$this->s3->putObject(array(
 			"Bucket" => $this->bucket,
 			"Key" => $path,
